@@ -7,27 +7,31 @@ import fs from "fs/promises";
 import path from "path";
 import url from "url";
 
-// ----------------- Конфигурация -----------------
+// ================== Конфигурация ==================
 const PORT = process.env.PORT || 3000;
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const MANAGER_USERNAMES = (process.env.MANAGER_USERNAMES || "")
   .split(",").map(s => s.trim().replace(/^@/, "")).filter(Boolean);
 const BRAND_NAME = process.env.BRAND_NAME || "iGadGetGo";
 const SUPPORT_EMAIL = process.env.SUPPORT_EMAIL || "info@igadgetgo.ru";
-const BASE_URL = process.env.RENDER_EXTERNAL_URL || process.env.BASE_URL;
+const BASE_URL = process.env.RENDER_EXTERNAL_URL || process.env.BASE_URL; // https://...onrender.com
 
-if (!BOT_TOKEN) { console.error("Missing BOT_TOKEN"); process.exit(1); }
+if (!BOT_TOKEN) {
+  console.error("Missing BOT_TOKEN");
+  process.exit(1);
+}
 
 const WEBHOOK_PATH = `/webhook/${encodeURIComponent(BOT_TOKEN)}`;
 const WEBHOOK_URL = BASE_URL ? `${BASE_URL}${WEBHOOK_PATH}` : null;
 
-// ----------------- Web + Bot -----------------
+// ================== App/Bot ==================
 const app = express();
 app.get("/", (_, res) => res.send("OK igadgetgo warranty bot (webhook + Cyrillic font)"));
 
 const bot = new Bot(BOT_TOKEN);
 
-// Память: у кого ждём IMEI
+// Память: ждём IMEI
+// chatId -> { product, qty, price, orderId }
 const chatIdToPending = new Map();
 
 function isManager(ctx) {
@@ -40,9 +44,9 @@ function isManager(ctx) {
 bot.command("start", async (ctx) => {
   if (!isManager(ctx)) return;
   await ctx.reply(
-    "Перешлите сюда уведомление о заказе из конструктора (полный текст с «Новый заказ №…», строкой «… x 1 шт.» и «Общая стоимость заказа: … ₽»).\n" +
-    "После разбора попрошу IMEI и пришлю PDF.\n" +
-    "IMEI можно вводить с пробелами — я оставлю только цифры."
+    "Перешлите сюда уведомление о заказе из конструктора (с строками:\n" +
+    "«Новый заказ №…», «… x 1 шт.», «Общая стоимость заказа: … ₽»).\n" +
+    "После разбора попрошу IMEI и пришлю PDF. IMEI можно вводить с пробелами."
   );
 });
 
@@ -53,11 +57,11 @@ bot.on("message:text", async (ctx) => {
     const pending = chatIdToPending.get(ctx.chat.id);
     const text = (ctx.message.text || "").trim();
 
-    // Если ждём IMEI — принимаем любые символы, оставляем только цифры
+    // Шаг 2: ждём IMEI
     if (pending) {
       const imeiDigits = text.replace(/\D+/g, "");
       if (imeiDigits.length < 8 || imeiDigits.length > 20) {
-        await ctx.reply("IMEI должен содержать от 8 до 20 цифр. Отправьте ещё раз.");
+        await ctx.reply("IMEI должен содержать 8–20 цифр. Отправьте ещё раз.");
         return;
       }
 
@@ -74,16 +78,15 @@ bot.on("message:text", async (ctx) => {
           orderId: pending.orderId || "manual",
           imei: imeiDigits
         });
-
         await ctx.replyWithDocument(new InputFile(pdf, `warranty_${pending.orderId || "manual"}.pdf`));
       } catch (err) {
         console.error("PDF generation error:", err);
-        await ctx.reply("Не удалось сформировать PDF. Проверьте, что в assets есть: logo.(png/jpg), stamp.(png/jpg), signature.(png/jpg), font.ttf (кириллица).");
+        await ctx.reply("Не удалось сформировать PDF. Проверьте assets: logo.(png/jpg), stamp.(png/jpg), signature.(png/jpg), font.ttf (кириллица).");
       }
       return;
     }
 
-    // Пытаемся распарсить пересланный текст заказа
+    // Шаг 1: парсим уведомление
     const parsed = parseOrder(text);
     if (!parsed) {
       await ctx.reply(
@@ -107,7 +110,7 @@ bot.on("message:text", async (ctx) => {
   }
 });
 
-// ----------------- Парсер уведомления -----------------
+// ================== Парсер уведомления ==================
 function parseOrder(raw) {
   const lines = raw.split("\n").map(l => l.trim()).filter(Boolean);
 
@@ -129,7 +132,7 @@ function parseOrder(raw) {
   return { product, qty, price, orderId };
 }
 
-// ----------------- Загрузка и вставка изображений/шрифта -----------------
+// ================== Загрузка изображений/шрифта ==================
 const __dirname = path.dirname(url.fileURLToPath(import.meta.url));
 
 async function loadFirstExisting(paths) {
@@ -147,8 +150,12 @@ async function loadImage(relBase) {
   ];
   const buf = await loadFirstExisting(candidates);
   if (!buf) { console.warn(`Image not found: ${relBase}`); return null; }
-  const isPng = candidates[0].endsWith(".png") && (await fs.stat(candidates[0]).catch(() => null));
-  return { buf, ext: isPng ? ".png" : ".jpg" };
+  // Определим по расширению первого найденного файла
+  const found = candidates.find(async p => {
+    try { await fs.access(p); return true; } catch { return false; }
+  });
+  const ext = (await fs.stat(path.join(__dirname, "assets", `${relBase}.png`).catch(() => null))) ? ".png" : ".jpg";
+  return { buf, ext };
 }
 
 async function embedImageAuto(pdfDoc, image) {
@@ -174,14 +181,14 @@ async function loadFontBytes() {
   return buf;
 }
 
-// ----------------- PDF генерация -----------------
+// ================== PDF генерация ==================
 async function makePdf({ brand, email, date, product, qty, price, orderId, imei }) {
   const pdfDoc = await PDFDocument.create();
-  pdfDoc.registerFontkit(fontkit);                  // важно для custom TTF
-  const fontBytes = await loadFontBytes();          // assets/font.ttf обязателен
+  pdfDoc.registerFontkit(fontkit);
+  const fontBytes = await loadFontBytes();
   const font = await pdfDoc.embedFont(fontBytes, { subset: true });
 
-  const page = pdfDoc.addPage([595.28, 841.89]);    // A4
+  const page = pdfDoc.addPage([595.28, 841.89]); // A4
   const { width } = page.getSize();
 
   const logo = await embedImageAuto(pdfDoc, await loadImage("logo"));
@@ -254,7 +261,7 @@ async function makePdf({ brand, email, date, product, qty, price, orderId, imei 
   return Buffer.from(bytes);
 }
 
-// ----------------- Старт (webhook) -----------------
+// ================== Старт (webhook) ==================
 app.use(express.json());
 app.use(WEBHOOK_PATH, webhookCallback(bot, "express"));
 
@@ -266,4 +273,10 @@ app.listen(PORT, async () => {
     if (!WEBHOOK_URL) {
       console.warn("BASE_URL/RENDER_EXTERNAL_URL не задан. Установите переменную окружения BASE_URL (публичный URL сервиса Render) и перезапустите.");
     } else {
-      await bot.api.setWebhook(WEBHOOK_URL,
+      await bot.api.setWebhook(WEBHOOK_URL, { allowed_updates: ["message", "callback_query"] });
+      console.log("Webhook set to:", WEBHOOK_URL);
+    }
+  } catch (e) {
+    console.error("Webhook setup error:", e);
+  }
+});
