@@ -237,21 +237,27 @@ async function makePdf({ brand, email, date, product, qty, price, orderId, buyer
   const page = pdfDoc.addPage([595.28, 841.89]); // A4
   const { width, height } = page.getSize();
 
-  // Водяной знак - полупрозрачный текст бренда по всему листу
-  const watermarkColor = rgb(0.9, 0.9, 0.9);
-  const watermarkSize = 60;
-  const watermarkSpacing = 120;
+  // Водяной знак - крупный, редкий, без наложений
+  const watermarkColor = rgb(0.95, 0.95, 0.95);
+  const watermarkSize = 120;
+  const watermarkSpacing = 300; // увеличил расстояние между знаками
   
-  for (let x = 0; x < width; x += watermarkSpacing) {
-    for (let y = 0; y < height; y += watermarkSpacing) {
-      page.drawText(brand, {
-        x: x + 20,
-        y: y + 20,
-        size: watermarkSize,
-        font: regularFont,
-        color: watermarkColor,
-        rotate: { type: 'degrees', angle: -45 }
-      });
+  // Размещаем водяные знаки в шахматном порядке
+  for (let row = 0; row < 3; row++) {
+    for (let col = 0; col < 2; col++) {
+      const x = 100 + col * watermarkSpacing;
+      const y = 200 + row * watermarkSpacing;
+      
+      if (x < width - 100 && y < height - 100) {
+        page.drawText(brand, {
+          x: x,
+          y: y,
+          size: watermarkSize,
+          font: regularFont,
+          color: watermarkColor,
+          rotate: { type: 'degrees', angle: -30 }
+        });
+      }
     }
   }
 
