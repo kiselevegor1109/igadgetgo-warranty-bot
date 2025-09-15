@@ -1,0 +1,15 @@
+{
+  "name": "igadgetgo-warranty-bot",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "dayjs": "^1.11.13",
+    "express": "^4.19.2",
+    "grammy": "^1.24.1",
+    "pdf-lib": "^1.17.1"
+  }
+}
