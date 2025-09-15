@@ -194,6 +194,27 @@ function drawBoldText(page, text, opts) {
   page.drawText(text, { x: x + 0.25, y, font, size, color });
 }
 
+// Перенос строк по словам под ширину maxWidth
+function drawWrappedText(page, text, x, y, { font, size, color, maxWidth, lineHeight }) {
+  const words = text.split(" ");
+  let line = "";
+  let cursorY = y;
+
+  for (const word of words) {
+    const candidate = line ? `${line} ${word}` : word;
+    const w = font.widthOfTextAtSize(candidate, size);
+    if (w > maxWidth && line) {
+      page.drawText(line, { x, y: cursorY, font, size, color });
+      cursorY -= lineHeight;
+      line = word;
+    } else {
+      line = candidate;
+    }
+  }
+  if (line) page.drawText(line, { x, y: cursorY, font, size, color });
+  return cursorY;
+}
+
 // ================== PDF генерация ==================
 async function makePdf({ brand, email, date, product, qty, price, orderId, buyerName, buyerPhone, imei }) {
   const pdfDoc = await PDFDocument.create();
@@ -210,9 +231,9 @@ async function makePdf({ brand, email, date, product, qty, price, orderId, buyer
 
   let y = 790;
 
-  // ЛОГО: правый верхний угол, уменьшено ещё на 15% (с 102 до 87)
+  // ЛОГО: правый верхний угол, ещё меньше (87 px)
   if (logo) {
-    const w = 87; // 102 * 0.85
+    const w = 87;
     const scale = w / logo.width;
     const h = logo.height * scale;
     const x = width - 40 - w;
@@ -227,20 +248,20 @@ async function makePdf({ brand, email, date, product, qty, price, orderId, buyer
   page.drawText(`Гарантийный документ № W-${orderId || "manual"}-${dayjs().format("YYMMDD")}`, { x: 40, y: y - 30, ...header });
   page.drawText(`Дата: ${date}`, { x: 40, y: y - 50, ...text });
   page.drawText(`Продавец: ${brand}  |  Контакты: ${email}`, { x: 40, y: y - 70, ...small });
-  
+
   // Покупатель и телефон с увеличенными отступами
-  let infoY = y - 95; // было 90, стало 95
+  let infoY = y - 95;
   if (buyerName) {
     page.drawText(`Покупатель: ${buyerName}`, { x: 40, y: infoY, ...text });
-    infoY -= 20; // было 16, стало 20
+    infoY -= 20;
   }
   if (buyerPhone) {
     page.drawText(`Телефон: ${buyerPhone}`, { x: 40, y: infoY, ...text });
-    infoY -= 20; // добавим отступ после телефона
+    infoY -= 20;
   }
 
-  // Таблица товаров с увеличенным отступом сверху
-  y = 650; // было 700, стало 650 (больше места сверху)
+  // Таблица товаров ниже, чтобы не пересекаться с блоком покупателя
+  y = 650;
   page.drawText("Товар", { x: 40, y, ...text });
   page.drawText("Кол-во", { x: 360, y, ...text });
   page.drawText("Цена", { x: 450, y, ...text });
@@ -257,8 +278,10 @@ async function makePdf({ brand, email, date, product, qty, price, orderId, buyer
   y -= 24;
   bold12(`IMEI: ${imei}`, 40, y);
 
+  // Условия с переносами
   y -= 40;
   page.drawText("Условия гарантии:", { x: 40, y, ...text });
+
   const terms = [
     "Срок гарантии 12 месяцев на продукцию Apple с даты продажи.",
     "Обслуживание по результатам диагностики авторизованного сервиса.",
@@ -266,10 +289,15 @@ async function makePdf({ brand, email, date, product, qty, price, orderId, buyer
     "Сохранность чека/заказа и соответствие IMEI обязательны.",
     "Срок ремонта/замены до 45 дней. Территория действия — РФ."
   ];
+
   y -= 18;
+  const startX = 50;
+  const maxWidth = (595.28 - 40) - startX; // правая граница: левый отступ 50, правый 40
   for (const line of terms) {
-    page.drawText(`• ${line}`, { x: 50, y, size: 10, font, color: rgb(0.2,0.2,0.2) });
-    y -= 14;
+    const newY = drawWrappedText(page, `• ${line}`, startX, y, {
+      font, size: 10, color: rgb(0.2,0.2,0.2), maxWidth, lineHeight: 12
+    });
+    y = newY - 6;
   }
 
   if (sign) {
