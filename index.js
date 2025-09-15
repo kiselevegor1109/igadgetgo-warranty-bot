@@ -1,6 +1,7 @@
 import express from "express";
 import { Bot, InputFile, webhookCallback } from "grammy";
 import { PDFDocument, rgb } from "pdf-lib";
+import fontkit from "@pdf-lib/fontkit";
 import dayjs from "dayjs";
 import fs from "fs/promises";
 import path from "path";
@@ -39,9 +40,9 @@ function isManager(ctx) {
 bot.command("start", async (ctx) => {
   if (!isManager(ctx)) return;
   await ctx.reply(
-    "Перешлите сюда уведомление о заказе из конструктора.\n" +
-    "Я извлеку товар, количество и цену, затем попрошу IMEI и пришлю PDF.\n\n" +
-    "Подсказка: IMEI можно вводить с пробелами — я оставлю только цифры."
+    "Перешлите сюда уведомление о заказе из конструктора (полный текст с «Новый заказ №…», строкой «… x 1 шт.» и «Общая стоимость заказа: … ₽»).\n" +
+    "После разбора попрошу IMEI и пришлю PDF.\n" +
+    "IMEI можно вводить с пробелами — я оставлю только цифры."
   );
 });
 
@@ -52,6 +53,7 @@ bot.on("message:text", async (ctx) => {
     const pending = chatIdToPending.get(ctx.chat.id);
     const text = (ctx.message.text || "").trim();
 
+    // Если ждём IMEI — принимаем любые символы, оставляем только цифры
     if (pending) {
       const imeiDigits = text.replace(/\D+/g, "");
       if (imeiDigits.length < 8 || imeiDigits.length > 20) {
@@ -76,18 +78,17 @@ bot.on("message:text", async (ctx) => {
         await ctx.replyWithDocument(new InputFile(pdf, `warranty_${pending.orderId || "manual"}.pdf`));
       } catch (err) {
         console.error("PDF generation error:", err);
-        await ctx.reply("Не удалось сформировать PDF. Убедитесь, что в assets есть: logo.(png/jpg), stamp.(png/jpg), signature.(png/jpg), font.ttf (кириллица).");
+        await ctx.reply("Не удалось сформировать PDF. Проверьте, что в assets есть: logo.(png/jpg), stamp.(png/jpg), signature.(png/jpg), font.ttf (кириллица).");
       }
       return;
     }
 
+    // Пытаемся распарсить пересланный текст заказа
     const parsed = parseOrder(text);
     if (!parsed) {
       await ctx.reply(
-        "Не смог распознать заказ. Нужны строки:\n" +
-        "— Новый заказ №<id>\n" +
-        "— <товар> x <число> шт.\n" +
-        "— Общая стоимость заказа: <цена> ₽"
+        "Не смог распознать заказ. Перешлите полноценное уведомление из конструктора.\n" +
+        "Нужны строки:\n— Новый заказ №<id>\n— <товар> x <число> шт.\n— Общая стоимость заказа: <цена> ₽"
       );
       return;
     }
@@ -133,22 +134,21 @@ const __dirname = path.dirname(url.fileURLToPath(import.meta.url));
 
 async function loadFirstExisting(paths) {
   for (const p of paths) {
-    try {
-      return await fs.readFile(p);
-    } catch {}
+    try { return await fs.readFile(p); } catch {}
   }
   return null;
 }
 
 async function loadImage(relBase) {
-  const fulls = [
+  const candidates = [
     path.join(__dirname, "assets", `${relBase}.png`),
     path.join(__dirname, "assets", `${relBase}.jpg`),
     path.join(__dirname, "assets", `${relBase}.jpeg`)
   ];
-  const buf = await loadFirstExisting(fulls);
+  const buf = await loadFirstExisting(candidates);
   if (!buf) { console.warn(`Image not found: ${relBase}`); return null; }
-  return { buf, ext: (fulls.find(p => p && p.endsWith(".png")) ? ".png" : ".jpg") };
+  const isPng = candidates[0].endsWith(".png") && (await fs.stat(candidates[0]).catch(() => null));
+  return { buf, ext: isPng ? ".png" : ".jpg" };
 }
 
 async function embedImageAuto(pdfDoc, image) {
@@ -163,7 +163,6 @@ async function embedImageAuto(pdfDoc, image) {
 }
 
 async function loadFontBytes() {
-  // Достаточно положить assets/font.ttf (любой кириллический TTF)
   const candidates = [
     path.join(__dirname, "assets", "font.ttf"),
     path.join(__dirname, "assets", "NotoSans-Regular.ttf"),
@@ -171,17 +170,18 @@ async function loadFontBytes() {
     path.join(__dirname, "assets", "DejaVuSans.ttf")
   ];
   const buf = await loadFirstExisting(candidates);
-  if (!buf) throw new Error("font.ttf не найден в assets (нужен TTF со встроенной кириллицей)");
+  if (!buf) throw new Error("font.ttf (кириллица) не найден в assets");
   return buf;
 }
 
 // ----------------- PDF генерация -----------------
 async function makePdf({ brand, email, date, product, qty, price, orderId, imei }) {
   const pdfDoc = await PDFDocument.create();
-  const fontBytes = await loadFontBytes();
+  pdfDoc.registerFontkit(fontkit);                  // важно для custom TTF
+  const fontBytes = await loadFontBytes();          // assets/font.ttf обязателен
   const font = await pdfDoc.embedFont(fontBytes, { subset: true });
 
-  const page = pdfDoc.addPage([595.28, 841.89]); // A4
+  const page = pdfDoc.addPage([595.28, 841.89]);    // A4
   const { width } = page.getSize();
 
   const logo = await embedImageAuto(pdfDoc, await loadImage("logo"));
@@ -197,33 +197,33 @@ async function makePdf({ brand, email, date, product, qty, price, orderId, imei 
     page.drawImage(logo, { x: 40, y: y - h, width: w, height: h });
   }
 
-  const headerOpts = { size: 14, font, color: rgb(0,0,0) };
-  const textOpts   = { size: 12, font, color: rgb(0,0,0) };
-  const smallOpts  = { size: 11, font, color: rgb(0.2,0.2,0.2) };
+  const header = { size: 14, font, color: rgb(0,0,0) };
+  const text   = { size: 12, font, color: rgb(0,0,0) };
+  const small  = { size: 11, font, color: rgb(0.2,0.2,0.2) };
 
-  page.drawText(`Гарантийный документ № W-${orderId || "manual"}-${dayjs().format("YYMMDD")}`, { x: 40, y: y - 30, ...headerOpts });
-  page.drawText(`Дата: ${date}`, { x: 40, y: y - 50, ...textOpts });
-  page.drawText(`Продавец: ${brand}  |  Контакты: ${email}`, { x: 40, y: y - 70, ...smallOpts });
+  page.drawText(`Гарантийный документ № W-${orderId || "manual"}-${dayjs().format("YYMMDD")}`, { x: 40, y: y - 30, ...header });
+  page.drawText(`Дата: ${date}`, { x: 40, y: y - 50, ...text });
+  page.drawText(`Продавец: ${brand}  |  Контакты: ${email}`, { x: 40, y: y - 70, ...small });
 
   y = 700;
-  page.drawText("Товар", { x: 40, y, ...textOpts });
-  page.drawText("Кол-во", { x: 360, y, ...textOpts });
-  page.drawText("Цена", { x: 450, y, ...textOpts });
+  page.drawText("Товар", { x: 40, y, ...text });
+  page.drawText("Кол-во", { x: 360, y, ...text });
+  page.drawText("Цена", { x: 450, y, ...text });
   page.drawRectangle({ x: 38, y: y-8, width: width-76, height: 1, color: rgb(0.8,0.8,0.8) });
 
   y -= 24;
-  page.drawText(product, { x: 40, y, ...textOpts });
-  page.drawText(String(qty), { x: 360, y, ...textOpts });
-  page.drawText(`${price.toLocaleString("ru-RU")} ₽`, { x: 450, y, ...textOpts });
+  page.drawText(product, { x: 40, y, ...text });
+  page.drawText(String(qty), { x: 360, y, ...text });
+  page.drawText(`${price.toLocaleString("ru-RU")} ₽`, { x: 450, y, ...text });
 
   y -= 32;
   page.drawRectangle({ x: 38, y: y-8, width: width-76, height: 1, color: rgb(0.8,0.8,0.8) });
 
   y -= 24;
-  page.drawText(`IMEI: ${imei}`, { x: 40, y, ...textOpts });
+  page.drawText(`IMEI: ${imei}`, { x: 40, y, ...text });
 
   y -= 40;
-  page.drawText("Условия гарантии:", { x: 40, y, ...textOpts });
+  page.drawText("Условия гарантии:", { x: 40, y, ...text });
   const terms = [
     "Срок гарантии 12 месяцев на продукцию Apple с даты продажи.",
     "Обслуживание по результатам диагностики авторизованного сервиса.",
@@ -266,10 +266,4 @@ app.listen(PORT, async () => {
     if (!WEBHOOK_URL) {
       console.warn("BASE_URL/RENDER_EXTERNAL_URL не задан. Установите переменную окружения BASE_URL (публичный URL сервиса Render) и перезапустите.");
     } else {
-      await bot.api.setWebhook(WEBHOOK_URL, { allowed_updates: ["message", "callback_query"] });
-      console.log("Webhook set to:", WEBHOOK_URL);
-    }
-  } catch (e) {
-    console.error("Webhook setup error:", e);
-  }
-});
+      await bot.api.setWebhook(WEBHOOK_URL,
