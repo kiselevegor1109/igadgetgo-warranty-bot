@@ -81,7 +81,7 @@ bot.on("message:text", async (ctx) => {
         await ctx.replyWithDocument(new InputFile(pdf, `warranty_${pending.orderId || "manual"}.pdf`));
       } catch (err) {
         console.error("PDF generation error:", err);
-        await ctx.reply("Не удалось сформировать PDF. Проверьте assets: logo.(png/jpg), stamp.(png/jpg), signature.(png/jpg), font.ttf (кириллица).");
+        await ctx.reply("Не удалось сформировать PDF. Проверьте assets: logo.(png/jpg), stamp.(png/jpg), signature.(png/jpg), font.ttf (кириллица), qr.png (QR магазина).");
       }
       return;
     }
@@ -169,14 +169,14 @@ async function embedImageAuto(pdfDoc, image) {
   }
 }
 
-async function loadFontBytes() {
-  const candidates = ["font.ttf", "NotoSans-Regular.ttf", "Inter-Regular.ttf", "DejaVuSans.ttf"];
+async function loadFontBytes(fontName) {
+  const candidates = [fontName, "font.ttf", "NotoSans-Regular.ttf", "Inter-Regular.ttf", "DejaVuSans.ttf"];
   for (const name of candidates) {
     try {
       return await fs.readFile(path.join(__dirname, "assets", name));
     } catch {}
   }
-  throw new Error("font.ttf (кириллица) не найден в assets");
+  throw new Error(`${fontName} (кириллица) не найден в assets`);
 }
 
 // ================== Утилиты ==================
@@ -190,7 +190,6 @@ function drawBoldText(page, text, opts) {
   page.drawText(text, { x: x + 0.25, y, font, size, color });
 }
 
-// Разбивка текста на строки с учётом maxWidth
 function wrapTextToLines(text, font, size, maxWidth) {
   const words = text.split(" ");
   const lines = [];
@@ -209,7 +208,6 @@ function wrapTextToLines(text, font, size, maxWidth) {
   return lines;
 }
 
-// Рисует массив строк с фиксированным interline и возвращает новый Y
 function drawLines(page, lines, x, y, { font, size, color, lineHeight }) {
   let cursorY = y;
   for (const ln of lines) {
@@ -223,15 +221,44 @@ function drawLines(page, lines, x, y, { font, size, color, lineHeight }) {
 async function makePdf({ brand, email, date, product, qty, price, orderId, buyerName, buyerPhone, imei }) {
   const pdfDoc = await PDFDocument.create();
   pdfDoc.registerFontkit(fontkit);
-  const fontBytes = await loadFontBytes();
-  const font = await pdfDoc.embedFont(fontBytes, { subset: true });
+  
+  // Загружаем обычный и жирный шрифты
+  const regularFontBytes = await loadFontBytes("font.ttf");
+  const regularFont = await pdfDoc.embedFont(regularFontBytes, { subset: true });
+  
+  let boldFont = regularFont;
+  try {
+    const boldFontBytes = await loadFontBytes("font-bold.ttf");
+    boldFont = await pdfDoc.embedFont(boldFontBytes, { subset: true });
+  } catch {
+    console.warn("Bold font not found, using regular font");
+  }
 
   const page = pdfDoc.addPage([595.28, 841.89]); // A4
-  const { width } = page.getSize();
+  const { width, height } = page.getSize();
+
+  // Водяной знак - полупрозрачный текст бренда по всему листу
+  const watermarkColor = rgb(0.9, 0.9, 0.9);
+  const watermarkSize = 60;
+  const watermarkSpacing = 120;
+  
+  for (let x = 0; x < width; x += watermarkSpacing) {
+    for (let y = 0; y < height; y += watermarkSpacing) {
+      page.drawText(brand, {
+        x: x + 20,
+        y: y + 20,
+        size: watermarkSize,
+        font: regularFont,
+        color: watermarkColor,
+        rotate: { type: 'degrees', angle: -45 }
+      });
+    }
+  }
 
   const logo = await embedImageAuto(pdfDoc, await loadImage("logo"));
   const stamp = await embedImageAuto(pdfDoc, await loadImage("stamp"));
   const sign  = await embedImageAuto(pdfDoc, await loadImage("signature"));
+  const qr    = await embedImageAuto(pdfDoc, await loadImage("qr"));
 
   let y = 790;
 
@@ -244,10 +271,10 @@ async function makePdf({ brand, email, date, product, qty, price, orderId, buyer
     page.drawImage(logo, { x, y: y - h, width: w, height: h });
   }
 
-  const header = { size: 14, font, color: rgb(0,0,0) };
-  const text   = { size: 12, font, color: rgb(0,0,0) };
-  const small  = { size: 11, font, color: rgb(0.2,0.2,0.2) };
-  const bold12 = (t, x, y) => drawBoldText(page, t, { x, y, font, size: 12, color: rgb(0,0,0) });
+  const header = { size: 14, font: regularFont, color: rgb(0,0,0) };
+  const text   = { size: 12, font: regularFont, color: rgb(0,0,0) };
+  const small  = { size: 11, font: regularFont, color: rgb(0.2,0.2,0.2) };
+  const bold12 = (t, x, y) => drawBoldText(page, t, { x, y, font: boldFont, size: 12, color: rgb(0,0,0) });
 
   page.drawText(`Гарантийный документ № W-${orderId || "manual"}-${dayjs().format("YYMMDD")}`, { x: 40, y: y - 30, ...header });
   page.drawText(`Дата: ${date}`, { x: 40, y: y - 50, ...text });
@@ -282,6 +309,11 @@ async function makePdf({ brand, email, date, product, qty, price, orderId, buyer
   y -= 24;
   bold12(`IMEI: ${imei}`, 40, y);
 
+  // Гарантия до
+  y -= 24;
+  const warrantyEndDate = dayjs().add(12, 'month').format("DD.MM.YYYY");
+  bold12(`Гарантия до: ${warrantyEndDate}`, 40, y);
+
   // Условия с равномерным интерлиньяжем
   y -= 40;
   page.drawText("Условия гарантии:", { x: 40, y, ...text });
@@ -298,16 +330,17 @@ async function makePdf({ brand, email, date, product, qty, price, orderId, buyer
   const startX = 50;
   const maxWidth = (595.28 - 40) - startX;
   const lineSize = 10;
-  const lineHeight = 14;   // фиксированный интерлиньяж
-  const bulletGap = 10;    // фиксированный зазор между пунктами
+  const lineHeight = 14;
+  const bulletGap = 10;
 
   for (const line of terms) {
-    const lines = wrapTextToLines(`• ${line}`, font, lineSize, maxWidth);
+    const lines = wrapTextToLines(`• ${line}`, regularFont, lineSize, maxWidth);
     y = drawLines(page, lines, startX, y, {
-      font, size: lineSize, color: rgb(0.2,0.2,0.2), lineHeight
+      font: regularFont, size: lineSize, color: rgb(0.2,0.2,0.2), lineHeight
     }) - bulletGap;
   }
 
+  // Подпись и печать
   if (sign) {
     const w = 220;
     const scale = w / sign.width;
@@ -319,6 +352,14 @@ async function makePdf({ brand, email, date, product, qty, price, orderId, buyer
     const scale = w / stamp.width;
     const h = stamp.height * scale;
     page.drawImage(stamp, { x: 360, y: 120, width: w, height: h });
+  }
+
+  // QR-код магазина в левом нижнем углу
+  if (qr) {
+    const w = 80;
+    const scale = w / qr.width;
+    const h = qr.height * scale;
+    page.drawImage(qr, { x: 40, y: 40, width: w, height: h });
   }
 
   const bytes = await pdfDoc.save();
