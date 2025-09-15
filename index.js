@@ -14,8 +14,8 @@ const MANAGER_USERNAMES = (process.env.MANAGER_USERNAMES || "")
   .split(",").map(s => s.trim().replace(/^@/, "")).filter(Boolean);
 const BRAND_NAME = process.env.BRAND_NAME || "iGadGetGo";
 const SUPPORT_EMAIL = process.env.SUPPORT_EMAIL || "info@igadgetgo.ru";
-const BASE_URL = process.env.RENDER_EXTERNAL_URL || process.env.BASE_URL; // https://...onrender.com
-const CURRENCY_SYMBOL = process.env.CURRENCY_SYMBOL || "руб."; // поставьте "₽", если ваш font.ttf его поддерживает
+const BASE_URL = process.env.RENDER_EXTERNAL_URL || process.env.BASE_URL;
+const CURRENCY_SYMBOL = process.env.CURRENCY_SYMBOL || "руб.";
 
 if (!BOT_TOKEN) {
   console.error("Missing BOT_TOKEN");
@@ -31,8 +31,7 @@ app.get("/", (_, res) => res.send("OK igadgetgo warranty bot (webhook + Cyrillic
 
 const bot = new Bot(BOT_TOKEN);
 
-// Память: ждём IMEI
-// chatId -> { product, qty, price, orderId }
+// chatId -> { product, qty, price, orderId, buyerName, buyerPhone }
 const chatIdToPending = new Map();
 
 function isManager(ctx) {
@@ -45,8 +44,7 @@ function isManager(ctx) {
 bot.command("start", async (ctx) => {
   if (!isManager(ctx)) return;
   await ctx.reply(
-    "Перешлите сюда уведомление о заказе из конструктора (с строками:\n" +
-    "«Новый заказ №…», «… x 1 шт.», «Общая стоимость заказа: … ₽»).\n" +
+    "Перешлите сюда уведомление о заказе (строки: «Новый заказ №…», «… x 1 шт.», «Общая стоимость заказа: … ₽», «Клиент: …», «Телефон Клиента: …»).\n" +
     "После разбора попрошу IMEI и пришлю PDF. IMEI можно вводить с пробелами."
   );
 });
@@ -77,6 +75,8 @@ bot.on("message:text", async (ctx) => {
           qty: pending.qty,
           price: pending.price,
           orderId: pending.orderId || "manual",
+          buyerName: pending.buyerName || "",
+          buyerPhone: pending.buyerPhone || "",
           imei: imeiDigits
         });
         await ctx.replyWithDocument(new InputFile(pdf, `warranty_${pending.orderId || "manual"}.pdf`));
@@ -92,7 +92,7 @@ bot.on("message:text", async (ctx) => {
     if (!parsed) {
       await ctx.reply(
         "Не смог распознать заказ. Перешлите полноценное уведомление из конструктора.\n" +
-        "Нужны строки:\n— Новый заказ №<id>\n— <товар> x <число> шт.\n— Общая стоимость заказа: <цена> ₽"
+        "Нужны строки:\n— Новый заказ №<id>\n— <товар> x <число> шт.\n— Общая стоимость заказа: <цена> ₽\n— Клиент: Имя(...)\n— Телефон Клиента: <номер>"
       );
       return;
     }
@@ -102,8 +102,10 @@ bot.on("message:text", async (ctx) => {
       `Заказ принят:\n` +
       `Товар: ${parsed.product}\n` +
       `Кол-во: ${parsed.qty}\n` +
-      `Цена: ${formatPrice(parsed.price)}\n\n` +
-      `Введите IMEI (можно с пробелами — я оставлю только цифры).`
+      `Цена: ${formatPrice(parsed.price)}\n` +
+      (parsed.buyerName ? `Покупатель: ${parsed.buyerName}\n` : "") +
+      (parsed.buyerPhone ? `Телефон: ${parsed.buyerPhone}\n` : "") +
+      `\nВведите IMEI (можно с пробелами — я оставлю только цифры).`
     );
   } catch (e) {
     console.error("Handler error:", e);
@@ -126,11 +128,23 @@ function parseOrder(raw) {
   const priceDigits = (priceLine.match(/([\d\s]+)\s*₽/)?.[1] || "").replace(/\s+/g, "");
   const price = Number(priceDigits || "0");
 
+  // Покупатель
+  const buyerLine = lines.find(l => /^Клиент:/i.test(l)) || "";
+  // Берём всё до "(" если есть, иначе после двоеточия
+  let buyerName = buyerLine.replace(/^Клиент:\s*/i, "").trim();
+  const idx = buyerName.indexOf("(");
+  if (idx > -1) buyerName = buyerName.slice(0, idx).trim();
+
+  // Телефон
+  const phoneLine = lines.find(l => /^Телефон Клиента:/i.test(l)) || "";
+  let buyerPhone = phoneLine.replace(/^Телефон Клиента:\s*/i, "").trim();
+  buyerPhone = buyerPhone.replace(/[^\d+]+/g, ""); // оставим + и цифры
+
   if (!product || !qty || !price) {
     console.log("Parse failed:", { product, qty, price, sample: raw.slice(0, 200) });
     return null;
   }
-  return { product, qty, price, orderId };
+  return { product, qty, price, orderId, buyerName, buyerPhone };
 }
 
 // ================== Загрузка изображений/шрифта ==================
@@ -142,7 +156,7 @@ async function loadImage(relBase) {
     const full = path.join(__dirname, "assets", name);
     try {
       const buf = await fs.readFile(full);
-      return { buf, ext: path.extname(name).toLowerCase() }; // ".png" | ".jpg" | ".jpeg"
+      return { buf, ext: path.extname(name).toLowerCase() };
     } catch {}
   }
   console.warn(`Image not found: ${relBase}`);
@@ -175,8 +189,15 @@ function formatPrice(price) {
   return `${price.toLocaleString("ru-RU")} ${CURRENCY_SYMBOL}`;
 }
 
+// Небольшая “эмуляция” жирного: рисуем текст дважды с микросмещением
+function drawBoldText(page, text, opts) {
+  const { x, y, font, size, color } = opts;
+  page.drawText(text, { x, y, font, size, color });
+  page.drawText(text, { x: x + 0.25, y, font, size, color });
+}
+
 // ================== PDF генерация ==================
-async function makePdf({ brand, email, date, product, qty, price, orderId, imei }) {
+async function makePdf({ brand, email, date, product, qty, price, orderId, buyerName, buyerPhone, imei }) {
   const pdfDoc = await PDFDocument.create();
   pdfDoc.registerFontkit(fontkit);
   const fontBytes = await loadFontBytes();
@@ -191,9 +212,9 @@ async function makePdf({ brand, email, date, product, qty, price, orderId, imei 
 
   let y = 790;
 
-  // ЛОГО: правый верхний угол
+  // ЛОГО: правый верхний угол, уменьшено на ~15% (с 120 до 102)
   if (logo) {
-    const w = 120;
+    const w = 102; // 120 * 0.85
     const scale = w / logo.width;
     const h = logo.height * scale;
     const x = width - 40 - w;
@@ -203,10 +224,19 @@ async function makePdf({ brand, email, date, product, qty, price, orderId, imei 
   const header = { size: 14, font, color: rgb(0,0,0) };
   const text   = { size: 12, font, color: rgb(0,0,0) };
   const small  = { size: 11, font, color: rgb(0.2,0.2,0.2) };
+  const bold12 = (t, x, y) => drawBoldText(page, t, { x, y, font, size: 12, color: rgb(0,0,0) });
 
   page.drawText(`Гарантийный документ № W-${orderId || "manual"}-${dayjs().format("YYMMDD")}`, { x: 40, y: y - 30, ...header });
   page.drawText(`Дата: ${date}`, { x: 40, y: y - 50, ...text });
   page.drawText(`Продавец: ${brand}  |  Контакты: ${email}`, { x: 40, y: y - 70, ...small });
+  let infoY = y - 90;
+  if (buyerName) {
+    page.drawText(`Покупатель: ${buyerName}`, { x: 40, y: infoY, ...text });
+    infoY -= 16;
+  }
+  if (buyerPhone) {
+    page.drawText(`Телефон: ${buyerPhone}`, { x: 40, y: infoY, ...text });
+  }
 
   y = 700;
   page.drawText("Товар", { x: 40, y, ...text });
@@ -217,16 +247,13 @@ async function makePdf({ brand, email, date, product, qty, price, orderId, imei 
   y -= 24;
   page.drawText(product, { x: 40, y, ...text });
   page.drawText(String(qty), { x: 360, y, ...text });
-
-  // Цена с безопасным символом валюты
-  const priceStr = formatPrice(price);
-  page.drawText(priceStr, { x: 450, y, ...text });
+  page.drawText(formatPrice(price), { x: 450, y, ...text });
 
   y -= 32;
   page.drawRectangle({ x: 38, y: y-8, width: 595.28-76, height: 1, color: rgb(0.8,0.8,0.8) });
 
   y -= 24;
-  page.drawText(`IMEI: ${imei}`, { x: 40, y, ...text });
+  bold12(`IMEI: ${imei}`, 40, y); // жирным
 
   y -= 40;
   page.drawText("Условия гарантии:", { x: 40, y, ...text });
