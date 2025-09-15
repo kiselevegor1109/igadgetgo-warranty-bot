@@ -6,6 +6,7 @@ import fs from "fs/promises";
 import path from "path";
 import url from "url";
 
+// ----------------- Конфигурация -----------------
 const PORT = process.env.PORT || 3000;
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const MANAGER_USERNAMES = (process.env.MANAGER_USERNAMES || "")
@@ -14,6 +15,7 @@ const MANAGER_USERNAMES = (process.env.MANAGER_USERNAMES || "")
   .filter(Boolean);
 const BRAND_NAME = process.env.BRAND_NAME || "iGadGetGo";
 const SUPPORT_EMAIL = process.env.SUPPORT_EMAIL || "info@igadgetgo.ru";
+// Для простоты используем локальное время контейнера
 const TZ = process.env.TIMEZONE || "Europe/Moscow";
 
 if (!BOT_TOKEN) {
@@ -21,115 +23,138 @@ if (!BOT_TOKEN) {
   process.exit(1);
 }
 
+// ----------------- Web + Bot -----------------
 const app = express();
 app.get("/", (_, res) => res.send("OK igadgetgo warranty bot"));
 
 const bot = new Bot(BOT_TOKEN);
 
-// Простая in-memory сессия: chatId -> ожидается IMEI по заказу
+// Память: у кого ждём IMEI и какие данные заказа
+// chatId -> { product, qty, price, orderId }
 const chatIdToPending = new Map();
 
 function isManager(ctx) {
   const u = ctx.from?.username || "";
-  return MANAGER_USERNAMES.includes(u);
+  const ok = MANAGER_USERNAMES.includes(u);
+  if (!ok) {
+    console.log(`Blocked user @${u} chat=${ctx.chat?.id}`);
+  }
+  return ok;
 }
 
 bot.command("start", async (ctx) => {
   if (!isManager(ctx)) return;
   await ctx.reply(
     "Перешлите сюда уведомление о заказе из конструктора.\n" +
-    "Я извлеку товар, количество и цену, затем попрошу IMEI и пришлю PDF."
+    "Я извлеку товар, количество и цену, затем попрошу IMEI и пришлю PDF.\n\n" +
+    "Подсказка: IMEI можно вводить с пробелами — я сам оставлю только цифры."
   );
 });
 
 bot.on("message:text", async (ctx) => {
-  if (!isManager(ctx)) return;
+  try {
+    if (!isManager(ctx)) return;
 
-  const pending = chatIdToPending.get(ctx.chat.id);
-  const text = ctx.message.text.trim();
+    const pending = chatIdToPending.get(ctx.chat.id);
+    const text = (ctx.message.text || "").trim();
 
-  // Если ждём IMEI
-  if (pending && /^\d{10,20}$/.test(text)) {
-    const imei = text;
-    chatIdToPending.delete(ctx.chat.id);
+    // Если ждём IMEI — принимаем любые символы, вытаскиваем только цифры
+    if (pending) {
+      const imeiDigits = text.replace(/\D+/g, ""); // оставить только цифры
+      if (imeiDigits.length < 8 || imeiDigits.length > 20) {
+        await ctx.reply("IMEI должен содержать от 8 до 20 цифр. Отправьте ещё раз.");
+        return;
+      }
 
-    const pdf = await makePdf({
-      brand: BRAND_NAME,
-      email: SUPPORT_EMAIL,
-      date: formatDateMsk(),
-      product: pending.product,
-      qty: pending.qty,
-      price: pending.price,
-      orderId: pending.orderId || "manual",
-      imei
-    });
+      chatIdToPending.delete(ctx.chat.id);
 
-    await ctx.replyWithDocument(
-      new InputFile(pdf, `warranty_${pending.orderId || "manual"}.pdf`)
-    ).catch(async () => {
-      await ctx.reply("PDF сформирован. Если файл не прикрепился — пришлите лог, я помогу.");
-    });
-    return;
-  }
+      try {
+        const pdf = await makePdf({
+          brand: BRAND_NAME,
+          email: SUPPORT_EMAIL,
+          date: dayjs().format("DD.MM.YYYY"),
+          product: pending.product,
+          qty: pending.qty,
+          price: pending.price,
+          orderId: pending.orderId || "manual",
+          imei: imeiDigits
+        });
 
-  // Пробуем распарсить пересланный текст заказа
-  const parsed = parseOrder(text);
-  if (!parsed) {
+        await ctx.replyWithDocument(
+          new InputFile(pdf, `warranty_${pending.orderId || "manual"}.pdf`)
+        );
+      } catch (err) {
+        console.error("PDF generation error:", err);
+        await ctx.reply("Не удалось сформировать PDF. Проверьте наличие файлов в assets/ (logo.png, stamp.png, signature.png) и пришлите логи.");
+      }
+      return;
+    }
+
+    // Пытаемся распарсить пересланный текст заказа
+    const parsed = parseOrder(text);
+    if (!parsed) {
+      await ctx.reply(
+        "Не смог распознать заказ. Перешлите сообщение как в уведомлении конструктора.\n" +
+        "Пример нужных строк:\n" +
+        "— Новый заказ №3\n" +
+        "— Строка с товаром и количеством: ... x 1 шт.\n" +
+        "— Общая стоимость заказа: 100 300 ₽"
+      );
+      return;
+    }
+
+    chatIdToPending.set(ctx.chat.id, parsed);
     await ctx.reply(
-      "Не смог распознать заказ. Перешлите сообщение в формате конструктора.\n" +
-      "Если я уже спросил IMEI — отправьте цифрами (10–20 символов)."
+      `Заказ принят:\n` +
+      `Товар: ${parsed.product}\n` +
+      `Кол-во: ${parsed.qty}\n` +
+      `Цена: ${parsed.price.toLocaleString("ru-RU")} ₽\n\n` +
+      `Введите IMEI (можно с пробелами — я оставлю только цифры).`
     );
-    return;
+  } catch (e) {
+    console.error("Handler error:", e);
+    try {
+      await ctx.reply("Произошла ошибка. Пришлите текст заказа ещё раз или IMEI повторно.");
+    } catch {}
   }
-
-  chatIdToPending.set(ctx.chat.id, parsed);
-  await ctx.reply(
-    `Заказ принят:\n` +
-    `Товар: ${parsed.product}\n` +
-    `Кол-во: ${parsed.qty}\n` +
-    `Цена: ${parsed.price.toLocaleString("ru-RU")} ₽\n\n` +
-    `Введите IMEI (только цифры).`
-  );
 });
 
-// ---------- Утилиты ----------
-
-function formatDateMsk() {
-  // Без доп.пакетов для TZ — используем локальное время хоста.
-  // Render (Европа) даст UTC, но дата всё равно ок. При желании можно подключить dayjs-timezone.
-  return dayjs().format("DD.MM.YYYY");
-}
-
+// ----------------- Парсер уведомления -----------------
 function parseOrder(raw) {
-  // Ожидаемый формат (пример):
-  // Новый заказ №3
-  // Состав заказа:
-  // iPhone16 Pro Max ... x 1 шт.
-  // - Объем памяти: ...
-  // Общая стоимость заказа: 100 300 ₽
+  // Ожидаем минимум:
+  // "Новый заказ №<id>"
+  // строку с "x <число> шт." — в ней берём товар и qty
+  // "Общая стоимость заказа: <цена> ₽"
   const lines = raw.split("\n").map(l => l.trim()).filter(Boolean);
 
   const orderLine = lines.find(l => /^Новый заказ №/i.test(l));
   const orderId = orderLine?.match(/№\s*([A-Za-z0-9_-]+)/)?.[1];
 
+  // Берём первую строку с шаблоном "x N шт."
   const productLine = lines.find(l => /x\s*\d+\s*шт\.?/i.test(l)) || "";
   const qty = Number(productLine.match(/x\s*(\d+)\s*шт/i)?.[1] || "1");
   const product = productLine.replace(/\s*x\s*\d+\s*шт\.?/i, "").trim();
 
+  // Цена
   const priceLine = lines.find(l => /^Общая стоимость заказа:/i.test(l)) || "";
   const priceDigits = (priceLine.match(/([\d\s]+)\s*₽/)?.[1] || "").replace(/\s+/g, "");
   const price = Number(priceDigits || "0");
 
-  if (!product || !qty || !price) return null;
+  if (!product || !qty || !price) {
+    console.log("Parse failed:", { product, qty, price, text: raw.slice(0, 200) });
+    return null;
+  }
   return { product, qty, price, orderId };
 }
 
+// ----------------- PDF генерация -----------------
 const __dirname = path.dirname(url.fileURLToPath(import.meta.url));
 
 async function loadPngBuffer(rel) {
   try {
     return await fs.readFile(path.join(__dirname, "assets", rel));
-  } catch {
+  } catch (e) {
+    console.warn(`Image not found: ${rel}`);
     return null;
   }
 }
@@ -213,6 +238,7 @@ async function makePdf({ brand, email, date, product, qty, price, orderId, imei 
   return Buffer.from(bytes);
 }
 
+// ----------------- Старт -----------------
 app.listen(PORT, () => {
   console.log("Server listening on " + PORT);
   bot.start({
