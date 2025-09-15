@@ -135,27 +135,19 @@ function parseOrder(raw) {
 // ================== Загрузка изображений/шрифта ==================
 const __dirname = path.dirname(url.fileURLToPath(import.meta.url));
 
-async function loadFirstExisting(paths) {
-  for (const p of paths) {
-    try { return await fs.readFile(p); } catch {}
-  }
-  return null;
-}
-
 async function loadImage(relBase) {
-  const candidates = [
-    path.join(__dirname, "assets", `${relBase}.png`),
-    path.join(__dirname, "assets", `${relBase}.jpg`),
-    path.join(__dirname, "assets", `${relBase}.jpeg`)
-  ];
-  const buf = await loadFirstExisting(candidates);
-  if (!buf) { console.warn(`Image not found: ${relBase}`); return null; }
-  // Определим по расширению первого найденного файла
-  const found = candidates.find(async p => {
-    try { await fs.access(p); return true; } catch { return false; }
-  });
-  const ext = (await fs.stat(path.join(__dirname, "assets", `${relBase}.png`).catch(() => null))) ? ".png" : ".jpg";
-  return { buf, ext };
+  const candidates = [`${relBase}.png`, `${relBase}.jpg`, `${relBase}.jpeg`];
+  for (const name of candidates) {
+    const full = path.join(__dirname, "assets", name);
+    try {
+      const buf = await fs.readFile(full);
+      return { buf, ext: path.extname(name).toLowerCase() }; // ".png" | ".jpg" | ".jpeg"
+    } catch {
+      // нет файла — пробуем следующее расширение
+    }
+  }
+  console.warn(`Image not found: ${relBase}`);
+  return null;
 }
 
 async function embedImageAuto(pdfDoc, image) {
@@ -170,15 +162,13 @@ async function embedImageAuto(pdfDoc, image) {
 }
 
 async function loadFontBytes() {
-  const candidates = [
-    path.join(__dirname, "assets", "font.ttf"),
-    path.join(__dirname, "assets", "NotoSans-Regular.ttf"),
-    path.join(__dirname, "assets", "Inter-Regular.ttf"),
-    path.join(__dirname, "assets", "DejaVuSans.ttf")
-  ];
-  const buf = await loadFirstExisting(candidates);
-  if (!buf) throw new Error("font.ttf (кириллица) не найден в assets");
-  return buf;
+  const candidates = ["font.ttf", "NotoSans-Regular.ttf", "Inter-Regular.ttf", "DejaVuSans.ttf"];
+  for (const name of candidates) {
+    try {
+      return await fs.readFile(path.join(__dirname, "assets", name));
+    } catch {}
+  }
+  throw new Error("font.ttf (кириллица) не найден в assets");
 }
 
 // ================== PDF генерация ==================
@@ -189,7 +179,6 @@ async function makePdf({ brand, email, date, product, qty, price, orderId, imei 
   const font = await pdfDoc.embedFont(fontBytes, { subset: true });
 
   const page = pdfDoc.addPage([595.28, 841.89]); // A4
-  const { width } = page.getSize();
 
   const logo = await embedImageAuto(pdfDoc, await loadImage("logo"));
   const stamp = await embedImageAuto(pdfDoc, await loadImage("stamp"));
@@ -216,7 +205,7 @@ async function makePdf({ brand, email, date, product, qty, price, orderId, imei 
   page.drawText("Товар", { x: 40, y, ...text });
   page.drawText("Кол-во", { x: 360, y, ...text });
   page.drawText("Цена", { x: 450, y, ...text });
-  page.drawRectangle({ x: 38, y: y-8, width: width-76, height: 1, color: rgb(0.8,0.8,0.8) });
+  page.drawRectangle({ x: 38, y: y-8, width: 595.28-76, height: 1, color: rgb(0.8,0.8,0.8) });
 
   y -= 24;
   page.drawText(product, { x: 40, y, ...text });
@@ -224,7 +213,7 @@ async function makePdf({ brand, email, date, product, qty, price, orderId, imei 
   page.drawText(`${price.toLocaleString("ru-RU")} ₽`, { x: 450, y, ...text });
 
   y -= 32;
-  page.drawRectangle({ x: 38, y: y-8, width: width-76, height: 1, color: rgb(0.8,0.8,0.8) });
+  page.drawRectangle({ x: 38, y: y-8, width: 595.28-76, height: 1, color: rgb(0.8,0.8,0.8) });
 
   y -= 24;
   page.drawText(`IMEI: ${imei}`, { x: 40, y, ...text });
