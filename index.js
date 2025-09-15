@@ -1,5 +1,5 @@
 import express from "express";
-import { Bot, InputFile } from "grammy";
+import { Bot, InputFile, webhookCallback } from "grammy";
 import { PDFDocument, rgb } from "pdf-lib";
 import dayjs from "dayjs";
 import fs from "fs/promises";
@@ -15,17 +15,22 @@ const MANAGER_USERNAMES = (process.env.MANAGER_USERNAMES || "")
   .filter(Boolean);
 const BRAND_NAME = process.env.BRAND_NAME || "iGadGetGo";
 const SUPPORT_EMAIL = process.env.SUPPORT_EMAIL || "info@igadgetgo.ru";
-const TZ = process.env.TIMEZONE || "Europe/Moscow"; // инфо-переменная
 
+// Render автоматически задаёт RENDER_EXTERNAL_URL. Если нет — можно вручную через BASE_URL.
+const BASE_URL = process.env.RENDER_EXTERNAL_URL || process.env.BASE_URL; // пример: https://igadgetgo-warranty-bot.onrender.com
 if (!BOT_TOKEN) {
   console.error("Missing BOT_TOKEN");
   process.exit(1);
 }
 
+const WEBHOOK_PATH = `/webhook/${encodeURIComponent(BOT_TOKEN)}`;
+const WEBHOOK_URL = BASE_URL ? `${BASE_URL}${WEBHOOK_PATH}` : null;
+
 // ----------------- Web + Bot -----------------
 const app = express();
-app.get("/", (_, res) => res.send("OK igadgetgo warranty bot"));
+app.get("/", (_, res) => res.send("OK igadgetgo warranty bot (webhook mode)"));
 
+// Создаём бота
 const bot = new Bot(BOT_TOKEN);
 
 // Память: у кого ждём IMEI и какие данные заказа
@@ -57,7 +62,7 @@ bot.on("message:text", async (ctx) => {
 
     // Если ждём IMEI — принимаем любые символы, вытаскиваем только цифры
     if (pending) {
-      const imeiDigits = text.replace(/\D+/g, ""); // оставить только цифры
+      const imeiDigits = text.replace(/\D+/g, "");
       if (imeiDigits.length < 8 || imeiDigits.length > 20) {
         await ctx.reply("IMEI должен содержать от 8 до 20 цифр. Отправьте ещё раз.");
         return;
@@ -116,21 +121,15 @@ bot.on("message:text", async (ctx) => {
 
 // ----------------- Парсер уведомления -----------------
 function parseOrder(raw) {
-  // Минимум ожидаем:
-  // "Новый заказ №<id>"
-  // строку с "x <число> шт." — в ней берём товар и qty
-  // "Общая стоимость заказа: <цена> ₽"
   const lines = raw.split("\n").map(l => l.trim()).filter(Boolean);
 
   const orderLine = lines.find(l => /^Новый заказ №/i.test(l));
   const orderId = orderLine?.match(/№\s*([A-Za-z0-9_-]+)/)?.[1];
 
-  // Первая строка с шаблоном "x N шт."
   const productLine = lines.find(l => /x\s*\d+\s*шт\.?/i.test(l)) || "";
   const qty = Number(productLine.match(/x\s*(\d+)\s*шт/i)?.[1] || "1");
   const product = productLine.replace(/\s*x\s*\d+\s*шт\.?/i, "").trim();
 
-  // Цена
   const priceLine = lines.find(l => /^Общая стоимость заказа:/i.test(l)) || "";
   const priceDigits = (priceLine.match(/([\d\s]+)\s*₽/)?.[1] || "").replace(/\s+/g, "");
   const price = Number(priceDigits || "0");
@@ -162,7 +161,7 @@ async function embedImageAuto(pdfDoc, image) {
   const { buf, ext } = image;
   try {
     if (ext === ".png") return await pdfDoc.embedPng(buf);
-    return await pdfDoc.embedJpg(buf); // jpg/jpeg
+    return await pdfDoc.embedJpg(buf);
   } catch (e) {
     console.error("Embed image error:", e);
     return null;
@@ -181,7 +180,6 @@ async function makePdf({ brand, email, date, product, qty, price, orderId, imei 
 
   let y = 790;
 
-  // Лого
   if (logo) {
     const w = 120;
     const scale = w / logo.width;
@@ -189,9 +187,7 @@ async function makePdf({ brand, email, date, product, qty, price, orderId, imei 
     page.drawImage(logo, { x: 40, y: y - h, width: w, height: h });
   }
 
-  page.drawText(`Гарантийный документ № W-${orderId || "manual"}-${dayjs().format("YYMMDD")}`, {
-    x: 40, y: y - 30, size: 14
-  });
+  page.drawText(`Гарантийный документ № W-${orderId || "manual"}-${dayjs().format("YYMMDD")}`, { x: 40, y: y - 30, size: 14 });
   page.drawText(`Дата: ${date}`, { x: 40, y: y - 50, size: 12 });
   page.drawText(`Продавец: ${brand}  |  Контакты: ${email}`, { x: 40, y: y - 70, size: 11, color: rgb(0.2,0.2,0.2) });
 
@@ -199,7 +195,6 @@ async function makePdf({ brand, email, date, product, qty, price, orderId, imei 
   page.drawText("Товар", { x: 40, y, size: 12 });
   page.drawText("Кол-во", { x: 360, y, size: 12 });
   page.drawText("Цена", { x: 450, y, size: 12 });
-
   page.drawRectangle({ x: 38, y: y-8, width: width-76, height: 1, color: rgb(0.8,0.8,0.8) });
 
   y -= 24;
@@ -228,7 +223,6 @@ async function makePdf({ brand, email, date, product, qty, price, orderId, imei 
     y -= 14;
   }
 
-  // Подпись и печать
   if (sign) {
     const w = 220;
     const scale = w / sign.width;
@@ -246,27 +240,25 @@ async function makePdf({ brand, email, date, product, qty, price, orderId, imei 
   return Buffer.from(bytes);
 }
 
-// ----------------- Старт -----------------
+// ----------------- Старт (webhook) -----------------
+app.use(express.json());
+app.use(WEBHOOK_PATH, webhookCallback(bot, "express"));
+
 app.listen(PORT, async () => {
   console.log("Server listening on " + PORT);
 
   try {
-    // Сбрасываем возможный вебхук и висящие апдейты, чтобы избежать 409
+    // Снимем старые вебхуки/апдейты и поставим наш вебхук
     await bot.api.deleteWebhook({ drop_pending_updates: true });
+    if (!WEBHOOK_URL) {
+      console.warn("BASE_URL/RENDER_EXTERNAL_URL не задан. Установите переменную окружения BASE_URL с публичным URL сервиса Render и перезапустите.");
+    } else {
+      await bot.api.setWebhook(WEBHOOK_URL, {
+        allowed_updates: ["message", "callback_query"]
+      });
+      console.log("Webhook set to:", WEBHOOK_URL);
+    }
   } catch (e) {
-    console.warn("deleteWebhook warning:", e?.description || e?.message || e);
+    console.error("Webhook setup error:", e);
   }
-
-  // Аккуратное завершение при рестартах
-  const stop = () => {
-    try { bot.stop(); } catch {}
-    process.exit(0);
-  };
-  process.on("SIGINT", stop);
-  process.on("SIGTERM", stop);
-
-  await bot.start({
-    onStart: () => console.log("Bot started"),
-    allowed_updates: ["message", "callback_query"]
-  });
 });
