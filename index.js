@@ -15,6 +15,7 @@ const MANAGER_USERNAMES = (process.env.MANAGER_USERNAMES || "")
 const BRAND_NAME = process.env.BRAND_NAME || "iGadGetGo";
 const SUPPORT_EMAIL = process.env.SUPPORT_EMAIL || "info@igadgetgo.ru";
 const BASE_URL = process.env.RENDER_EXTERNAL_URL || process.env.BASE_URL; // https://...onrender.com
+const CURRENCY_SYMBOL = process.env.CURRENCY_SYMBOL || "руб."; // поставьте "₽", если ваш font.ttf его поддерживает
 
 if (!BOT_TOKEN) {
   console.error("Missing BOT_TOKEN");
@@ -101,7 +102,7 @@ bot.on("message:text", async (ctx) => {
       `Заказ принят:\n` +
       `Товар: ${parsed.product}\n` +
       `Кол-во: ${parsed.qty}\n` +
-      `Цена: ${parsed.price.toLocaleString("ru-RU")} ₽\n\n` +
+      `Цена: ${formatPrice(parsed.price)}\n\n` +
       `Введите IMEI (можно с пробелами — я оставлю только цифры).`
     );
   } catch (e) {
@@ -142,9 +143,7 @@ async function loadImage(relBase) {
     try {
       const buf = await fs.readFile(full);
       return { buf, ext: path.extname(name).toLowerCase() }; // ".png" | ".jpg" | ".jpeg"
-    } catch {
-      // нет файла — пробуем следующее расширение
-    }
+    } catch {}
   }
   console.warn(`Image not found: ${relBase}`);
   return null;
@@ -171,6 +170,11 @@ async function loadFontBytes() {
   throw new Error("font.ttf (кириллица) не найден в assets");
 }
 
+// ================== Утилиты ==================
+function formatPrice(price) {
+  return `${price.toLocaleString("ru-RU")} ${CURRENCY_SYMBOL}`;
+}
+
 // ================== PDF генерация ==================
 async function makePdf({ brand, email, date, product, qty, price, orderId, imei }) {
   const pdfDoc = await PDFDocument.create();
@@ -179,6 +183,7 @@ async function makePdf({ brand, email, date, product, qty, price, orderId, imei 
   const font = await pdfDoc.embedFont(fontBytes, { subset: true });
 
   const page = pdfDoc.addPage([595.28, 841.89]); // A4
+  const { width } = page.getSize();
 
   const logo = await embedImageAuto(pdfDoc, await loadImage("logo"));
   const stamp = await embedImageAuto(pdfDoc, await loadImage("stamp"));
@@ -186,11 +191,13 @@ async function makePdf({ brand, email, date, product, qty, price, orderId, imei 
 
   let y = 790;
 
+  // ЛОГО: правый верхний угол
   if (logo) {
     const w = 120;
     const scale = w / logo.width;
     const h = logo.height * scale;
-    page.drawImage(logo, { x: 40, y: y - h, width: w, height: h });
+    const x = width - 40 - w;
+    page.drawImage(logo, { x, y: y - h, width: w, height: h });
   }
 
   const header = { size: 14, font, color: rgb(0,0,0) };
@@ -210,7 +217,10 @@ async function makePdf({ brand, email, date, product, qty, price, orderId, imei 
   y -= 24;
   page.drawText(product, { x: 40, y, ...text });
   page.drawText(String(qty), { x: 360, y, ...text });
-  page.drawText(`${price.toLocaleString("ru-RU")} ₽`, { x: 450, y, ...text });
+
+  // Цена с безопасным символом валюты
+  const priceStr = formatPrice(price);
+  page.drawText(priceStr, { x: 450, y, ...text });
 
   y -= 32;
   page.drawRectangle({ x: 38, y: y-8, width: 595.28-76, height: 1, color: rgb(0.8,0.8,0.8) });
