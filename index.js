@@ -231,7 +231,7 @@ async function makePdf({ brand, email, date, product, qty, price, orderId, buyer
 
   let y = 790;
 
-  // ЛОГО: правый верхний угол, ещё меньше (87 px)
+  // ЛОГО: правый верхний угол, 87 px
   if (logo) {
     const w = 87;
     const scale = w / logo.width;
@@ -249,7 +249,7 @@ async function makePdf({ brand, email, date, product, qty, price, orderId, buyer
   page.drawText(`Дата: ${date}`, { x: 40, y: y - 50, ...text });
   page.drawText(`Продавец: ${brand}  |  Контакты: ${email}`, { x: 40, y: y - 70, ...small });
 
-  // Покупатель и телефон с увеличенными отступами
+  // Покупатель и телефон
   let infoY = y - 95;
   if (buyerName) {
     page.drawText(`Покупатель: ${buyerName}`, { x: 40, y: infoY, ...text });
@@ -260,7 +260,7 @@ async function makePdf({ brand, email, date, product, qty, price, orderId, buyer
     infoY -= 20;
   }
 
-  // Таблица товаров ниже, чтобы не пересекаться с блоком покупателя
+  // Таблица товаров
   y = 650;
   page.drawText("Товар", { x: 40, y, ...text });
   page.drawText("Кол-во", { x: 360, y, ...text });
@@ -278,7 +278,7 @@ async function makePdf({ brand, email, date, product, qty, price, orderId, buyer
   y -= 24;
   bold12(`IMEI: ${imei}`, 40, y);
 
-  // Условия с переносами
+  // Условия с переносами и увеличенным межстрочным интервалом
   y -= 40;
   page.drawText("Условия гарантии:", { x: 40, y, ...text });
 
@@ -292,12 +292,16 @@ async function makePdf({ brand, email, date, product, qty, price, orderId, buyer
 
   y -= 18;
   const startX = 50;
-  const maxWidth = (595.28 - 40) - startX; // правая граница: левый отступ 50, правый 40
+  const maxWidth = (595.28 - 40) - startX;
+  const paragraphLineHeight = 14;
+  const bulletGap = 10;
+
   for (const line of terms) {
-    const newY = drawWrappedText(page, `• ${line}`, startX, y, {
-      font, size: 10, color: rgb(0.2,0.2,0.2), maxWidth, lineHeight: 12
-    });
-    y = newY - 6;
+    y = drawWrappedText(page, `• ${line}`, startX, y, {
+      font, size: 10, color: rgb(0.2,0.2,0.2),
+      maxWidth,
+      lineHeight: paragraphLineHeight
+    }) - bulletGap;
   }
 
   if (sign) {
