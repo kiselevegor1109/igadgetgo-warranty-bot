@@ -130,7 +130,6 @@ function parseOrder(raw) {
 
   // Покупатель
   const buyerLine = lines.find(l => /^Клиент:/i.test(l)) || "";
-  // Берём всё до "(" если есть, иначе после двоеточия
   let buyerName = buyerLine.replace(/^Клиент:\s*/i, "").trim();
   const idx = buyerName.indexOf("(");
   if (idx > -1) buyerName = buyerName.slice(0, idx).trim();
@@ -138,7 +137,7 @@ function parseOrder(raw) {
   // Телефон
   const phoneLine = lines.find(l => /^Телефон Клиента:/i.test(l)) || "";
   let buyerPhone = phoneLine.replace(/^Телефон Клиента:\s*/i, "").trim();
-  buyerPhone = buyerPhone.replace(/[^\d+]+/g, ""); // оставим + и цифры
+  buyerPhone = buyerPhone.replace(/[^\d+]+/g, "");
 
   if (!product || !qty || !price) {
     console.log("Parse failed:", { product, qty, price, sample: raw.slice(0, 200) });
@@ -189,7 +188,6 @@ function formatPrice(price) {
   return `${price.toLocaleString("ru-RU")} ${CURRENCY_SYMBOL}`;
 }
 
-// Небольшая “эмуляция” жирного: рисуем текст дважды с микросмещением
 function drawBoldText(page, text, opts) {
   const { x, y, font, size, color } = opts;
   page.drawText(text, { x, y, font, size, color });
@@ -212,9 +210,9 @@ async function makePdf({ brand, email, date, product, qty, price, orderId, buyer
 
   let y = 790;
 
-  // ЛОГО: правый верхний угол, уменьшено на ~15% (с 120 до 102)
+  // ЛОГО: правый верхний угол, уменьшено ещё на 15% (с 102 до 87)
   if (logo) {
-    const w = 102; // 120 * 0.85
+    const w = 87; // 102 * 0.85
     const scale = w / logo.width;
     const h = logo.height * scale;
     const x = width - 40 - w;
@@ -229,16 +227,20 @@ async function makePdf({ brand, email, date, product, qty, price, orderId, buyer
   page.drawText(`Гарантийный документ № W-${orderId || "manual"}-${dayjs().format("YYMMDD")}`, { x: 40, y: y - 30, ...header });
   page.drawText(`Дата: ${date}`, { x: 40, y: y - 50, ...text });
   page.drawText(`Продавец: ${brand}  |  Контакты: ${email}`, { x: 40, y: y - 70, ...small });
-  let infoY = y - 90;
+  
+  // Покупатель и телефон с увеличенными отступами
+  let infoY = y - 95; // было 90, стало 95
   if (buyerName) {
     page.drawText(`Покупатель: ${buyerName}`, { x: 40, y: infoY, ...text });
-    infoY -= 16;
+    infoY -= 20; // было 16, стало 20
   }
   if (buyerPhone) {
     page.drawText(`Телефон: ${buyerPhone}`, { x: 40, y: infoY, ...text });
+    infoY -= 20; // добавим отступ после телефона
   }
 
-  y = 700;
+  // Таблица товаров с увеличенным отступом сверху
+  y = 650; // было 700, стало 650 (больше места сверху)
   page.drawText("Товар", { x: 40, y, ...text });
   page.drawText("Кол-во", { x: 360, y, ...text });
   page.drawText("Цена", { x: 450, y, ...text });
@@ -253,7 +255,7 @@ async function makePdf({ brand, email, date, product, qty, price, orderId, buyer
   page.drawRectangle({ x: 38, y: y-8, width: 595.28-76, height: 1, color: rgb(0.8,0.8,0.8) });
 
   y -= 24;
-  bold12(`IMEI: ${imei}`, 40, y); // жирным
+  bold12(`IMEI: ${imei}`, 40, y);
 
   y -= 40;
   page.drawText("Условия гарантии:", { x: 40, y, ...text });
