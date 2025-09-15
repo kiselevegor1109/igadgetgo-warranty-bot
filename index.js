@@ -56,7 +56,6 @@ bot.on("message:text", async (ctx) => {
     const pending = chatIdToPending.get(ctx.chat.id);
     const text = (ctx.message.text || "").trim();
 
-    // Шаг 2: ждём IMEI
     if (pending) {
       const imeiDigits = text.replace(/\D+/g, "");
       if (imeiDigits.length < 8 || imeiDigits.length > 20) {
@@ -87,7 +86,6 @@ bot.on("message:text", async (ctx) => {
       return;
     }
 
-    // Шаг 1: парсим уведомление
     const parsed = parseOrder(text);
     if (!parsed) {
       await ctx.reply(
@@ -128,13 +126,11 @@ function parseOrder(raw) {
   const priceDigits = (priceLine.match(/([\d\s]+)\s*₽/)?.[1] || "").replace(/\s+/g, "");
   const price = Number(priceDigits || "0");
 
-  // Покупатель
   const buyerLine = lines.find(l => /^Клиент:/i.test(l)) || "";
   let buyerName = buyerLine.replace(/^Клиент:\s*/i, "").trim();
   const idx = buyerName.indexOf("(");
   if (idx > -1) buyerName = buyerName.slice(0, idx).trim();
 
-  // Телефон
   const phoneLine = lines.find(l => /^Телефон Клиента:/i.test(l)) || "";
   let buyerPhone = phoneLine.replace(/^Телефон Клиента:\s*/i, "").trim();
   buyerPhone = buyerPhone.replace(/[^\d+]+/g, "");
@@ -194,24 +190,32 @@ function drawBoldText(page, text, opts) {
   page.drawText(text, { x: x + 0.25, y, font, size, color });
 }
 
-// Перенос строк по словам под ширину maxWidth
-function drawWrappedText(page, text, x, y, { font, size, color, maxWidth, lineHeight }) {
+// Разбивка текста на строки с учётом maxWidth
+function wrapTextToLines(text, font, size, maxWidth) {
   const words = text.split(" ");
+  const lines = [];
   let line = "";
-  let cursorY = y;
-
   for (const word of words) {
     const candidate = line ? `${line} ${word}` : word;
     const w = font.widthOfTextAtSize(candidate, size);
     if (w > maxWidth && line) {
-      page.drawText(line, { x, y: cursorY, font, size, color });
-      cursorY -= lineHeight;
+      lines.push(line);
       line = word;
     } else {
       line = candidate;
     }
   }
-  if (line) page.drawText(line, { x, y: cursorY, font, size, color });
+  if (line) lines.push(line);
+  return lines;
+}
+
+// Рисует массив строк с фиксированным interline и возвращает новый Y
+function drawLines(page, lines, x, y, { font, size, color, lineHeight }) {
+  let cursorY = y;
+  for (const ln of lines) {
+    page.drawText(ln, { x, y: cursorY, font, size, color });
+    cursorY -= lineHeight;
+  }
   return cursorY;
 }
 
@@ -278,7 +282,7 @@ async function makePdf({ brand, email, date, product, qty, price, orderId, buyer
   y -= 24;
   bold12(`IMEI: ${imei}`, 40, y);
 
-  // Условия с переносами и увеличенным межстрочным интервалом
+  // Условия с равномерным интерлиньяжем
   y -= 40;
   page.drawText("Условия гарантии:", { x: 40, y, ...text });
 
@@ -293,14 +297,14 @@ async function makePdf({ brand, email, date, product, qty, price, orderId, buyer
   y -= 18;
   const startX = 50;
   const maxWidth = (595.28 - 40) - startX;
-  const paragraphLineHeight = 14;
-  const bulletGap = 10;
+  const lineSize = 10;
+  const lineHeight = 14;   // фиксированный интерлиньяж
+  const bulletGap = 10;    // фиксированный зазор между пунктами
 
   for (const line of terms) {
-    y = drawWrappedText(page, `• ${line}`, startX, y, {
-      font, size: 10, color: rgb(0.2,0.2,0.2),
-      maxWidth,
-      lineHeight: paragraphLineHeight
+    const lines = wrapTextToLines(`• ${line}`, font, lineSize, maxWidth);
+    y = drawLines(page, lines, startX, y, {
+      font, size: lineSize, color: rgb(0.2,0.2,0.2), lineHeight
     }) - bulletGap;
   }
 
