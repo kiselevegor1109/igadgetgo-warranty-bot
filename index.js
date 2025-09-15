@@ -15,8 +15,7 @@ const MANAGER_USERNAMES = (process.env.MANAGER_USERNAMES || "")
   .filter(Boolean);
 const BRAND_NAME = process.env.BRAND_NAME || "iGadGetGo";
 const SUPPORT_EMAIL = process.env.SUPPORT_EMAIL || "info@igadgetgo.ru";
-// Для простоты используем локальное время контейнера
-const TZ = process.env.TIMEZONE || "Europe/Moscow";
+const TZ = process.env.TIMEZONE || "Europe/Moscow"; // инфо-переменная
 
 if (!BOT_TOKEN) {
   console.error("Missing BOT_TOKEN");
@@ -36,9 +35,7 @@ const chatIdToPending = new Map();
 function isManager(ctx) {
   const u = ctx.from?.username || "";
   const ok = MANAGER_USERNAMES.includes(u);
-  if (!ok) {
-    console.log(`Blocked user @${u} chat=${ctx.chat?.id}`);
-  }
+  if (!ok) console.log(`Blocked user @${u} chat=${ctx.chat?.id}`);
   return ok;
 }
 
@@ -47,7 +44,7 @@ bot.command("start", async (ctx) => {
   await ctx.reply(
     "Перешлите сюда уведомление о заказе из конструктора.\n" +
     "Я извлеку товар, количество и цену, затем попрошу IMEI и пришлю PDF.\n\n" +
-    "Подсказка: IMEI можно вводить с пробелами — я сам оставлю только цифры."
+    "Подсказка: IMEI можно вводить с пробелами — я оставлю только цифры."
   );
 });
 
@@ -85,7 +82,7 @@ bot.on("message:text", async (ctx) => {
         );
       } catch (err) {
         console.error("PDF generation error:", err);
-        await ctx.reply("Не удалось сформировать PDF. Проверьте наличие файлов в assets/ (logo.png, stamp.png, signature.png) и пришлите логи.");
+        await ctx.reply("Не удалось сформировать PDF. Проверьте файлы в assets/ (logo, stamp, signature в PNG/JPG) и пришлите логи.");
       }
       return;
     }
@@ -113,15 +110,13 @@ bot.on("message:text", async (ctx) => {
     );
   } catch (e) {
     console.error("Handler error:", e);
-    try {
-      await ctx.reply("Произошла ошибка. Пришлите текст заказа ещё раз или IMEI повторно.");
-    } catch {}
+    try { await ctx.reply("Произошла ошибка. Пришлите текст заказа ещё раз или IMEI повторно."); } catch {}
   }
 });
 
 // ----------------- Парсер уведомления -----------------
 function parseOrder(raw) {
-  // Ожидаем минимум:
+  // Минимум ожидаем:
   // "Новый заказ №<id>"
   // строку с "x <число> шт." — в ней берём товар и qty
   // "Общая стоимость заказа: <цена> ₽"
@@ -130,7 +125,7 @@ function parseOrder(raw) {
   const orderLine = lines.find(l => /^Новый заказ №/i.test(l));
   const orderId = orderLine?.match(/№\s*([A-Za-z0-9_-]+)/)?.[1];
 
-  // Берём первую строку с шаблоном "x N шт."
+  // Первая строка с шаблоном "x N шт."
   const productLine = lines.find(l => /x\s*\d+\s*шт\.?/i.test(l)) || "";
   const qty = Number(productLine.match(/x\s*(\d+)\s*шт/i)?.[1] || "1");
   const product = productLine.replace(/\s*x\s*\d+\s*шт\.?/i, "").trim();
@@ -141,38 +136,53 @@ function parseOrder(raw) {
   const price = Number(priceDigits || "0");
 
   if (!product || !qty || !price) {
-    console.log("Parse failed:", { product, qty, price, text: raw.slice(0, 200) });
+    console.log("Parse failed:", { product, qty, price, sample: raw.slice(0, 200) });
     return null;
   }
   return { product, qty, price, orderId };
 }
 
-// ----------------- PDF генерация -----------------
+// ----------------- Загрузка и вставка изображений (PNG/JPG) -----------------
 const __dirname = path.dirname(url.fileURLToPath(import.meta.url));
 
-async function loadPngBuffer(rel) {
+async function loadImageBuffer(relBase) {
+  const candidates = [`${relBase}.png`, `${relBase}.jpg`, `${relBase}.jpeg`];
+  for (const name of candidates) {
+    try {
+      const buf = await fs.readFile(path.join(__dirname, "assets", name));
+      return { buf, ext: path.extname(name).toLowerCase() };
+    } catch {}
+  }
+  console.warn(`Image not found: ${relBase} (png/jpg/jpeg)`);
+  return null;
+}
+
+async function embedImageAuto(pdfDoc, image) {
+  if (!image) return null;
+  const { buf, ext } = image;
   try {
-    return await fs.readFile(path.join(__dirname, "assets", rel));
+    if (ext === ".png") return await pdfDoc.embedPng(buf);
+    return await pdfDoc.embedJpg(buf); // jpg/jpeg
   } catch (e) {
-    console.warn(`Image not found: ${rel}`);
+    console.error("Embed image error:", e);
     return null;
   }
 }
 
+// ----------------- PDF генерация -----------------
 async function makePdf({ brand, email, date, product, qty, price, orderId, imei }) {
   const pdfDoc = await PDFDocument.create();
   const page = pdfDoc.addPage([595.28, 841.89]); // A4
   const { width } = page.getSize();
 
-  const logoPng = await loadPngBuffer("logo.png");
-  const stampPng = await loadPngBuffer("stamp.png");
-  const signPng  = await loadPngBuffer("signature.png");
+  const logo = await embedImageAuto(pdfDoc, await loadImageBuffer("logo"));
+  const stamp = await embedImageAuto(pdfDoc, await loadImageBuffer("stamp"));
+  const sign  = await embedImageAuto(pdfDoc, await loadImageBuffer("signature"));
 
   let y = 790;
 
   // Лого
-  if (logoPng) {
-    const logo = await pdfDoc.embedPng(logoPng);
+  if (logo) {
     const w = 120;
     const scale = w / logo.width;
     const h = logo.height * scale;
@@ -219,15 +229,13 @@ async function makePdf({ brand, email, date, product, qty, price, orderId, imei 
   }
 
   // Подпись и печать
-  if (signPng) {
-    const sign = await pdfDoc.embedPng(signPng);
+  if (sign) {
     const w = 220;
     const scale = w / sign.width;
     const h = sign.height * scale;
     page.drawImage(sign, { x: 60, y: 140, width: w, height: h });
   }
-  if (stampPng) {
-    const stamp = await pdfDoc.embedPng(stampPng);
+  if (stamp) {
     const w = 160;
     const scale = w / stamp.width;
     const h = stamp.height * scale;
@@ -239,9 +247,25 @@ async function makePdf({ brand, email, date, product, qty, price, orderId, imei 
 }
 
 // ----------------- Старт -----------------
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
   console.log("Server listening on " + PORT);
-  bot.start({
+
+  try {
+    // Сбрасываем возможный вебхук и висящие апдейты, чтобы избежать 409
+    await bot.api.deleteWebhook({ drop_pending_updates: true });
+  } catch (e) {
+    console.warn("deleteWebhook warning:", e?.description || e?.message || e);
+  }
+
+  // Аккуратное завершение при рестартах
+  const stop = () => {
+    try { bot.stop(); } catch {}
+    process.exit(0);
+  };
+  process.on("SIGINT", stop);
+  process.on("SIGTERM", stop);
+
+  await bot.start({
     onStart: () => console.log("Bot started"),
     allowed_updates: ["message", "callback_query"]
   });
